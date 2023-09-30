@@ -29,17 +29,33 @@ using namespace nonstd;
 
 struct Implicit { int x;          Implicit(int v) : x(v) {} };
 struct Explicit { int x; explicit Explicit(int v) : x(v) {} };
-struct MoveOnly {
+
+struct MoveOnly
+{
     int x;
     explicit MoveOnly(int x) :x{x} {}
-    MoveOnly(const MoveOnly&) = delete;
-    MoveOnly(MoveOnly&& other) noexcept :x{other.x} {}
-    MoveOnly& operator=(const MoveOnly&) = delete;
-    MoveOnly& operator=(MoveOnly&& other) noexcept {
-        if (&other == this) return *this;
+
+    MoveOnly( MoveOnly const &  ) = delete;
+    MoveOnly( MoveOnly && other ) noexcept : x{ other.x } {}
+
+    MoveOnly& operator=( MoveOnly const &  ) = delete;
+    MoveOnly& operator=( MoveOnly && other ) noexcept
+    {
+        if (&other == this)
+            return *this;
         x = other.x;
         return *this;
     }
+};
+
+struct NonMovableNonCopyable
+{
+    NonMovableNonCopyable() = default;
+
+    NonMovableNonCopyable( NonMovableNonCopyable const & ) = delete;
+    NonMovableNonCopyable( NonMovableNonCopyable &&      ) = delete;
+    NonMovableNonCopyable& operator=( NonMovableNonCopyable const & ) = delete;
+    NonMovableNonCopyable& operator=( NonMovableNonCopyable &&      ) = delete;
 };
 
 bool operator==( Implicit a, Implicit b ) { return a.x == b.x; }
@@ -619,6 +635,20 @@ CASE( "expected: Allows to default construct" )
     EXPECT( e.has_value() );
 }
 
+CASE( "expected: Allows to default construct from noncopyable, noncopyable value type" )
+{
+    expected<NonMovableNonCopyable, NonMovableNonCopyable> e;
+
+    EXPECT( e.has_value() );
+}
+
+CASE( "expected: Allows to default construct from noncopyable, noncopyable error type" )
+{
+    expected<NonMovableNonCopyable, NonMovableNonCopyable> e{ unexpect_t{} };
+
+    EXPECT( !e.has_value() );
+}
+
 CASE( "expected: Allows to copy-construct from expected: value" )
 {
     expected<int, char> a = 7;
@@ -647,6 +677,7 @@ CASE( "expected: Allows to move-construct from expected: value" )
 
     EXPECT( b              );
     EXPECT( b.value() == 7 );
+    EXPECT( a              );   // postcondition: unchanged!
 }
 
 CASE( "expected: Allows to move-construct from expected: error" )
@@ -1209,6 +1240,128 @@ CASE( "expected: Throws bad_expected_access on value access when disengaged" )
     EXPECT_THROWS_AS( std::move(ec).value(), bad_expected_access<int> );
 }
 
+#if nsel_P2505R >= 4
+CASE( "expected: Allows to observe its unexpected value, or fallback to the specified value with error_or" " [monadic p2505r4]")
+{
+    const auto ve = 3;
+    const auto vu = 7;
+    expected<int, int> e{ ve };
+    expected<int, int> u{ unexpect, 0 };
+
+    EXPECT( e.error_or( vu ) == vu );
+    EXPECT( u.error_or( vu ) ==  0 );
+}
+#endif // nsel_P2505R >= 4
+
+#if nsel_P2505R >= 3
+CASE( "expected: Allows to map value with and_then" " [monadic p2505r3]" )
+{
+    const auto mul2 = []( int n ) -> expected<int, int> { return n * 2; };
+    const auto to_unexpect42 = []( int ) -> expected<int, int> { return make_unexpected( 42 ); };
+
+    {
+        expected<int, int> e{ 11 };
+        const expected<int, int> ce{ 21 };
+        expected<int, int> ue{ unexpect, 42 };
+        EXPECT( e.and_then( mul2 ).value() == 22 );
+        EXPECT( ce.and_then( mul2 ).value() == 42 );
+        EXPECT( !ue.and_then( mul2 ).has_value());
+        EXPECT( ue.and_then( mul2 ).error() == 42 );
+        EXPECT( !e.and_then( to_unexpect42 ).has_value());
+        EXPECT( e.and_then( to_unexpect42 ).error() == 42 );
+        EXPECT( ce.and_then( to_unexpect42 ).error() == 42 );
+    }
+
+    const auto moveonly_x_mul2 = [](MoveOnly val) -> expected<int, int> { return val.x * 2; };
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).and_then( moveonly_x_mul2 ).value() == 66 );
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 15 } }).and_then( [](MoveOnly&&) -> expected<MoveOnly, int> { return make_unexpected( 42 ); } ).error() == 42 );
+
+    const auto map_to_void = [](int) -> expected<void, int> { return {}; };
+    const auto map_to_void_unexpect42 = [](int) -> expected<void, int> { return make_unexpected( 42 ); };
+    static_assert( std::is_same< expected<void, int>, decltype( expected<int, int>( 3 ).and_then( map_to_void ) ) >::value,
+        "and_then mapping to void results in expected<void>");
+    EXPECT( (expected<int, int>(3)).and_then( map_to_void ).has_value() );
+    EXPECT( !(expected<int, int>(3)).and_then( map_to_void_unexpect42 ).has_value() );
+    EXPECT( (expected<int, int>(3)).and_then( map_to_void_unexpect42 ).error() == 42 );
+}
+
+CASE( "expected: Allows to map unexpected with or_else" " [monadic p2505r3]" )
+{
+    const auto to_unexpect43 = []( int ) -> expected<int, int> { return make_unexpected( 43 ); };
+
+    {
+        expected<int, int> e{ 11 };
+        const expected<int, int> ce{ 21 };
+        expected<int, int> ue{ unexpect, 42 };
+        EXPECT( e.or_else( to_unexpect43 ).has_value());
+        EXPECT( e.or_else( to_unexpect43 ).value() == 11 );
+        EXPECT( ce.or_else( to_unexpect43 ).value() == 21 );
+        EXPECT( !ue.or_else( to_unexpect43 ).has_value());
+        EXPECT( ue.or_else( to_unexpect43 ).error() == 43 );
+    }
+
+    const auto fallback_throw = []( int ) -> expected<int, int> { throw std::runtime_error( "or_else" ); };
+    EXPECT_THROWS_AS( (expected<int, int>{ unexpect, 42 }).or_else( fallback_throw ), std::runtime_error );
+
+    const auto moveonly_fallback_to_66 = [](int) -> expected<MoveOnly, int> { return MoveOnly{ 66 }; };
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).or_else( moveonly_fallback_to_66 ).value() == 33 );
+    EXPECT( (expected<MoveOnly, int>{ unexpect, 15 }).or_else(moveonly_fallback_to_66).value() == 66 );
+}
+
+CASE( "expected: Allows to transform value" " [monadic p2505r3]" )
+{
+    const auto mul2 = []( int n ) -> int { return n * 2; };
+
+    {
+        expected<int, int> e{ 11 };
+        const expected<int, int> ce{ 21 };
+        expected<int, int> ue{ unexpect, 42 };
+        EXPECT( e.transform( mul2 ).value() == 22 );
+        EXPECT( ce.transform( mul2 ).value() == 42 );
+        EXPECT( !ue.transform( mul2 ).has_value());
+        EXPECT( ue.transform( mul2 ).error() == 42 );
+    }
+
+#if nsel_P2505R >= 5
+    // R5 changed remove_cvref_t to remove_cv_t in transform/transform_error, which broke data member pointer transforms,
+    // because the result type must be a valid expected value type, but expressions with reference types are not.
+    const auto moveonly_map_to_x = [](MoveOnly val) { return val.x; };
+#else
+    const auto moveonly_map_to_x = &MoveOnly::x;
+#endif // nsel_P2505R >= 5
+    const auto moveonly_x_mul2 = [](MoveOnly val) -> int { return val.x * 2; };
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).transform( moveonly_map_to_x ).value() == 33 );
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).transform( moveonly_map_to_x ).transform( mul2 ).value() == 66 );
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).transform( moveonly_x_mul2 ).has_value() );
+    EXPECT( (expected<MoveOnly, int>{ MoveOnly{ 33 } }).transform( moveonly_x_mul2 ).value() == 66 );
+    EXPECT( !(expected<MoveOnly, int>{ unexpect, 15 }).transform( [](MoveOnly&&) -> int { return 42; } ).has_value() );
+    EXPECT( (expected<MoveOnly, int>{ unexpect, 15 }).transform( [](MoveOnly&&) -> int { return 42; } ).error() == 15 );
+
+    const auto map_to_void = [](int) -> void { };
+    static_assert( std::is_same< expected<void, int>, decltype( expected<int, int>( 3 ).transform( map_to_void ) ) >::value,
+        "transform to void results in expected<void>" );
+    EXPECT( (expected<int, int>(3)).transform( map_to_void ).has_value() );
+    static_assert( std::is_same< decltype( (expected<int, int>(3)).transform( map_to_void ).value() ), void >::value,
+        "transform to void results in void value" );
+}
+
+CASE( "expected: Allows to map errors with transform_error" " [monadic p2505r3]" )
+{
+    const auto to_43 = []( int ) -> int { return 43; };
+
+    {
+        expected<int, int> e{ 11 };
+        const expected<int, int> ce{ 21 };
+        expected<int, int> ue{ unexpect, 42 };
+        EXPECT( e.transform_error( to_43 ).has_value());
+        EXPECT( e.transform_error( to_43 ).value() == 11 );
+        EXPECT( ce.transform_error( to_43 ).value() == 21 );
+        EXPECT( !ue.transform_error( to_43 ).has_value());
+        EXPECT( ue.transform_error( to_43 ).error() == 43 );
+    }
+}
+#endif // nsel_P2505R >= 3
+
 // -----------------------------------------------------------------------
 // expected<void> specialization
 
@@ -1247,6 +1400,7 @@ CASE( "expected<void>: Allows to move-construct from expected<void>: value" )
     expected<void, int> b{ std::move( a ) };
 
     EXPECT( b );
+    EXPECT( a );    // postcondition: unchanged!
 }
 
 CASE( "expected<void>: Allows to move-construct from expected<void>: error" )
@@ -1505,6 +1659,123 @@ CASE( "expected<void>: Throws bad_expected_access on value access when disengage
     EXPECT_THROWS_AS( std::move(ec).value(), bad_expected_access<int> );
 }
 
+#if nsel_P2505R >= 4
+CASE( "expected<void>: Allows to observe unexpected value, or fallback to a default value with error_or" " [monadic p2505r4]" )
+{
+    const auto vu = 7;
+    expected<void, int> e;
+    expected<void, int> u{ unexpect, 0 };
+
+    EXPECT( e.error_or( vu ) == vu );
+    EXPECT( u.error_or( vu ) == 0 );
+}
+#endif // nsel_P2505R >= 4
+
+#if nsel_P2505R >= 3
+CASE( "expected<void>: Allows to call argless functions with and_then" " [monadic p2505r3]" )
+{
+    const auto ret22 = []() -> expected<int, int> { return 22; };
+    const auto unexpect32 = []() -> expected<int, int> { return make_unexpected( 32 ); };
+
+    {
+        expected<void, int> e;
+        const expected<void, int> ce;
+        expected<void, int> ue{ unexpect, 42 };
+        EXPECT( e.has_value() );
+        EXPECT( ce.has_value() );
+        EXPECT( e.and_then( ret22 ).value() == 22 );
+        EXPECT( ce.and_then( ret22 ).value() == 22 );
+        EXPECT( !ue.and_then( ret22 ).has_value());
+        EXPECT( ue.and_then( ret22 ).error() == 42 );
+        EXPECT( !e.and_then( unexpect32 ).has_value());
+        EXPECT( e.and_then( unexpect32 ).error() == 32 );
+        EXPECT( ce.and_then( unexpect32 ).error() == 32 );
+    }
+
+    {
+        bool called = false;
+        expected<void, int> e;
+        e.and_then( [&called]() -> expected<void, int> {
+            called = true;
+            return {};
+        } );
+        EXPECT( called );
+    }
+
+    {
+        bool called = false;
+        expected<void, int>{}.and_then( [&called]() -> expected<void, int> {
+            called = true;
+            return {};
+        } );
+        EXPECT( called );
+    }
+
+    {
+        bool called = false;
+        expected<void, int>{ unexpect, 42 }.and_then( [&called]() -> expected<void, int> {
+            called = true;
+            return {};
+        } );
+        EXPECT( !called );
+    }
+
+    const bool map_to_unexpect_success = !expected<void, int>{}.and_then( []() -> expected<void, int> { return make_unexpected( 42 ); } ).has_value();
+    EXPECT( map_to_unexpect_success );
+}
+
+CASE( "expected<void>: Allows to map to expected or unexpected with or_else" " [monadic p2505r3]" )
+{
+    const auto make_valid = [](int) -> expected<void, int> { return {}; };
+    const auto unexpect32 = [](int) -> expected<void, int> { return make_unexpected( 32 ); };
+
+    {
+        expected<void, int> e;
+        const expected<void, int> ce;
+        expected<void, int> ue{ unexpect, 42 };
+        EXPECT( e.has_value() );
+        EXPECT( ce.has_value() );
+        EXPECT( e.or_else( unexpect32 ).has_value());
+        static_assert( std::is_same< decltype( e.or_else( unexpect32 ).value() ), void >::value,
+            "or_else mapping to void results in void value" );
+        EXPECT( ce.or_else( unexpect32 ).has_value());
+        EXPECT( !ue.or_else( unexpect32 ).has_value());
+        EXPECT( ue.or_else( make_valid ).has_value() );
+        static_assert( std::is_same< decltype( ue.or_else( make_valid ).value() ), void >::value,
+            "or_else mapping to void results in void value" );
+        EXPECT( ue.or_else( unexpect32 ).error() == 32 );
+    }
+}
+
+CASE( "expected<void>: Allows to assign a new expected value using transform" " [monadic p2505r3]" )
+{
+    const auto make_int_32 = [] { return 32; };
+    const auto mul2 = [](int v) { return v * 2; };
+    expected<void, int> e;
+    static_assert( std::is_same< decltype( e.transform( make_int_32 ) )::value_type, int >::value, "" );
+    EXPECT( e.transform( make_int_32 ).value() == 32 );
+    EXPECT( e.transform( make_int_32 ).transform( mul2 ).value() == 64 );
+}
+
+CASE( "expected<void>: Allows to map unexpected error value via transform_error" " [monadic p2505r3]" )
+{
+    const auto mul2 = []( int v ) -> int { return v * 2; };
+    enum class my_error { einval };
+    const auto map_to_my_error = [](int) { return my_error::einval; };
+
+    {
+        expected<void, int> e;
+        const expected<void, int> ce;
+        expected<void, int> ue{ unexpect, 42 };
+        EXPECT( e.transform_error( mul2 ).has_value());
+        EXPECT( ce.transform_error( mul2 ).has_value());
+        EXPECT( !ue.transform_error( mul2 ).has_value());
+        EXPECT( ue.transform_error( mul2 ).error() == 84 );
+        EXPECT( ue.transform_error( map_to_my_error ).error() == my_error::einval );
+    }
+}
+#endif // nsel_P2505R >= 3
+
 // [expected<> unwrap()]
 
 // [expected<> factories]
@@ -1586,6 +1857,25 @@ CASE( "operators: Provides expected relational operators" )
     SECTION( "unexpected >= disengaged" ) { EXPECT    ( u  >= d  ); }
 #endif
 
+    }
+}
+
+CASE( "operators: Provides expected relational operators (void)" )
+{
+    SETUP( "" ) {
+        expected<void, char> ev1;
+        expected<void, char> ev2;
+        expected<void, char> evu{ unexpect };
+
+    // compare engaged expected with engaged expected
+
+    SECTION( "  engaged == engaged"     ) { EXPECT(     ev1 == ev2 ); }
+    SECTION( "!(engaged != engaged)"    ) { EXPECT_NOT( ev1 != ev2 ); }
+
+    // compare engaged expected with disengaged expected
+
+    SECTION( "  engaged != disengaged"  ) { EXPECT(     ev1 != evu ); }
+    SECTION( "!(engaged == disengaged)" ) { EXPECT_NOT( ev1 == evu ); }
     }
 }
 
@@ -1819,6 +2109,96 @@ CASE( "pr-41" )
     EXPECT( std::move(c).error() == 7 );
     EXPECT( std::move(cc).error() == 7 );
 }
+
+// issue #50, https://github.com/martinmoene/expected-lite/issues/50
+
+namespace issue_50 {
+
+struct MyConstMemberNonMoveableObject
+{
+    const int x;
+    MyConstMemberNonMoveableObject( int x_ ) : x( x_ ) {}
+    MyConstMemberNonMoveableObject( MyConstMemberNonMoveableObject const & ) = default;
+};
+
+nonstd::unexpected_type<MyConstMemberNonMoveableObject> create_nonmoveable()
+{
+    return nonstd::make_unexpected<MyConstMemberNonMoveableObject>( MyConstMemberNonMoveableObject(3) );
+}
+
+} // namespace issue_50
+
+namespace issue_51 {
+
+int compare_equal_with_expected_void()
+{
+    auto ev1 = nonstd::expected<void, int>{};
+    auto ev2 = nonstd::expected<void, int>{};
+    return ev1 == ev2;
+}
+
+int compare_not_equal_with_expected_void()
+{
+    auto ev1 = nonstd::expected<void, int>{};
+    auto ev2 = nonstd::expected<void, int>{};
+    return ev1 != ev2;
+}
+
+} // namespace issue_51
+
+namespace issue_59 {
+
+struct NonMovableNonCopyable
+{
+    NonMovableNonCopyable() = default;
+
+    NonMovableNonCopyable( NonMovableNonCopyable const &  ) = delete;
+    NonMovableNonCopyable( NonMovableNonCopyable       && ) = delete;
+    NonMovableNonCopyable& operator=( NonMovableNonCopyable const &  ) = delete;
+    NonMovableNonCopyable& operator=( NonMovableNonCopyable       && ) = delete;
+};
+} // namespace issue_59
+
+CASE( "issue-58" )
+{
+    static_assert( !std::is_copy_constructible<issue_59::NonMovableNonCopyable>::value, "is not copy constructible" );
+    static_assert( !std::is_move_constructible<issue_59::NonMovableNonCopyable>::value, "is not move constructible" );
+
+    nonstd::expected<issue_59::NonMovableNonCopyable, issue_59::NonMovableNonCopyable> expected;
+    nonstd::expected<issue_59::NonMovableNonCopyable, issue_59::NonMovableNonCopyable> unexpected( nonstd::unexpect_t{} );
+
+    EXPECT(  expected.has_value()   );
+    EXPECT( !unexpected.has_value() );
+}
+
+#if nsel_P2505R >= 3
+CASE( "invoke" )
+{
+    struct A {
+      int x;
+      constexpr int get() const { return x; }
+      constexpr int get2(char) const { return x; }
+    };
+    static_assert( nonstd::expected_lite::detail::invoke( &A::x, A{21} ) == 21, "" );
+    EXPECT( nonstd::expected_lite::detail::invoke( &MoveOnly::x, MoveOnly(42) ) == 42 );
+    constexpr A lval{ 7 };
+    static_assert( nonstd::expected_lite::detail::invoke( &A::x, lval ) == 7, "" );
+    A mut_lval{ 12 };
+    std::reference_wrapper<A> ref{ mut_lval };
+    const std::reference_wrapper<const A> cref{ lval };
+    EXPECT( nonstd::expected_lite::detail::invoke( &A::x, ref ) == 12 );
+    EXPECT( nonstd::expected_lite::detail::invoke( &A::x, cref ) == 7 );
+    static_assert( nonstd::expected_lite::detail::invoke(&A::x, &lval) == 7, "" );
+    static_assert( nonstd::expected_lite::detail::invoke(&A::get, &lval) == 7, "" );
+    static_assert( nonstd::expected_lite::detail::invoke(&A::get, A{77}) == 77, "" );
+    EXPECT( nonstd::expected_lite::detail::invoke(&A::get, ref) == 12 );
+    EXPECT( nonstd::expected_lite::detail::invoke(&A::get, cref) == 7 );
+    static_assert( nonstd::expected_lite::detail::invoke(&A::get2, &lval, 'a') == 7, "" );
+    static_assert( nonstd::expected_lite::detail::invoke(&A::get2, A{77}, 'a') == 77, "" );
+    EXPECT( nonstd::expected_lite::detail::invoke(&A::get2, ref, 'a') == 12 );
+    EXPECT( nonstd::expected_lite::detail::invoke(&A::get2, cref, 'a') == 7 );
+}
+#endif // nsel_P2505R >= 3
 
 // -----------------------------------------------------------------------
 //  using as optional
